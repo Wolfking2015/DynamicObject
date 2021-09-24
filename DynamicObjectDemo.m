@@ -24,13 +24,20 @@ FixationPointSizePix = 20;%Fixation point diameter,in pixel;
 ObjectViewAngle = 180;%degree %Define the righward direction zero;
 ObjectEccentricityDeg = 10;%degree  
 
-ObjectSizeDeg = [7, 5];%in degree; This is the initial width and height;
+ObjectSizeDeg = [3.5, 2.5];%in degree; This is the initial width and height;
 %ObjectSizeCM = [3.5, 2.5];%in cm; This is the initial width and height;
 
 %Object moving parameters
 ObjectMotionVelocty = 0.04; %cm/s; positive: zooming; negative: shrinking
-TotalMotionTime = 1000; %in ms
-PureZooming = 1; %Flag to control motion perspective: 1: zooming on the original corr, 0: towards subject
+TotalMotionTime = 500; %in ms
+PureZooming = 2; %Flag to control motion perspective: 1: zooming on the original corr, 0: towards subject;2:Translation on x
+%3: Rotation condition
+SwayAngle = -8;%in degree; only valid when PureZoom = 3
+
+JitterFlag = 0;%JitterStimulus
+JitterDeg = 0.1;%Jitter in degree
+
+
 
 %Load Object images
 ObjectPath = 'Z:\ProgramsInOHLab\DynamicObject\img\';%Path in windows; Surface pro4;
@@ -130,6 +137,10 @@ end
 
 %% ----------------Set up Object Motion parameters--------------------%
 fr=Screen('NominalFrameRate', screenNumber);%Frame rate, in hz
+if fr < 0.001
+    %In case there is no fr recognized 
+    fr = 60;
+end
 SecPerFrame = 1 / fr; %in s
 TotalMotionFrame = ceil(TotalMotionTime / 1000 / SecPerFrame);%total frame
 ObjectMotionVeloctyInFrame_mm = ObjectMotionVelocty * TotalMotionTime / TotalMotionFrame;% mm/frame, unit change to preserve precision
@@ -142,11 +153,13 @@ FPCoor = [0,0,0];
 
 %First, translational component, projection of motion vector onto object-FP
 %coordinate
-if PureZooming
+if PureZooming == 1
     ObjMoveVecUnit = [0,0,1]; %Unit Motion Vector
+elseif PureZooming == 2
+    ObjMoveVecUnit = [1,0,0]; %Unit Motion Vector   
 else
     ObjMoveVecUnit = (EyeCoor - ObjCoor)/norm((ObjCoor - EyeCoor)); %Unit Motion Vector
-end
+end   
 ObjMoveVecFull = ObjMoveVecUnit * ObjectMotionVeloctyInFrame_mm ; % Full Motion Vector
 
 ObjMoveVecFull_Translation = dot(ObjMoveVecFull,(FPCoor - ObjCoor));
@@ -182,9 +195,80 @@ ObjMoveVecFull_ExpandingVec_H = linspace(ObjectSize_H,ObjMoveVecFull_ExpandingEn
 
 %Now make the base rectangle 
 for i = 1 : TotalMotionFrame
-    baseRectM = [0 0 ObjMoveVecFull_ExpandingVec_W(i) ObjMoveVecFull_ExpandingVec_H(i)];
-    centeredRectM(i,:) = CenterRectOnPointd(baseRectM, ObjectLoc_X_ChangeVec_FP(i), ObjectLoc_Y_ChangeVec_FP(i));
+    if PureZooming == 3
+        %Rotation condition : Zoom flag = 3;
+        baseRectM = baseRect;
+        centeredRectM(i,:) = centeredRect;
+        
+    else
+        baseRectM = [0 0 ObjMoveVecFull_ExpandingVec_W(i) ObjMoveVecFull_ExpandingVec_H(i)];
+        centeredRectM(i,:) = CenterRectOnPointd(baseRectM, ObjectLoc_X_ChangeVec_FP(i), ObjectLoc_Y_ChangeVec_FP(i));
+    end
+
 end
+
+%angle = zeros(1,TotalMotionFrame);
+if PureZooming == 3
+
+ %Sway period
+   Period = [0,-SwayAngle,0,SwayAngle,0];
+    
+    angle = [];
+    for j = 1 : length(Period)-1
+        angle = [angle, linspace(Period(j),Period(j+1),floor(TotalMotionFrame/(length(Period)-1)))];
+        
+    end
+    
+   angle(TotalMotionFrame) = 0;
+end    
+
+
+
+%Overwrite the base rectangle for jitter stimulus
+
+%All conditions
+j_direction = [0: 45: 359];
+
+if JitterFlag
+    %angle = zeros(1,TotalMotionFrame);
+    for i = 1 : TotalMotionFrame
+        baseRectM = baseRect; %Size keeps the same
+        
+        if mod(i, 4) == 1
+            %Randomly choose a direction
+            rng('shuffle');
+            randd = randi([1,length(j_direction)],1);
+            
+            center_j_x(i) = sin(j_direction(randd)*pi/180) * JitterDeg * PixPerDeg_W;
+            center_j_y(i) = cos(j_direction(randd)*pi/180) * JitterDeg * PixPerDeg_H;
+            
+        elseif mod(i,4) == 3
+            %Choose the opposite direction
+            center_j_x(i) = -center_j_x(i - 2);
+            center_j_y(i) = -center_j_x(i - 2);
+            
+        else
+            %Keep origin
+            center_j_x(i) = 0;
+            center_j_y(i) = 0;
+        end
+        
+        %Force it back to origin if this is the last frame
+        if i == TotalMotionFrame
+            center_j_x(i) = 0;
+            center_j_y(i) = 0;
+        end
+        
+        
+         centeredRectM(i,:) = CenterRectOnPointd(baseRectM, ObjectLoc_X + center_j_x(i), ObjectLoc_Y - center_j_y(i));
+        
+        
+    end
+    
+end
+
+
+
 
 
 %% ----------------Draw the stimulus in sequence--------------------------%
@@ -205,7 +289,19 @@ for i=1:NumberOfObjectsInOneTrial
     for j = 1 : TotalMotionFrame
         WaitSecs(SecPerFrame/2);
         Screen('DrawDots', window, [FixationPointLoc_X FixationPointLoc_Y], FixationPointSizePix, FixationPointColor, [], 2);
-        Screen('DrawTexture', window, texObjectSeq{i}, [], centeredRectM(j,:), 0);
+        if PureZooming == 3
+        % Translate, rotate, re-tranlate and then draw our square
+            Screen('glPushMatrix', window)
+            Screen('glTranslate', window, ObjectLoc_X, ObjectLoc_Y)
+            Screen('glRotate', window, angle(mod(j,length(angle))+1), 0, 0);
+            Screen('glTranslate', window, -ObjectLoc_X, -ObjectLoc_Y)
+            Screen('DrawTexture', window, texObjectSeq{i}, [], centeredRectM(j,:), 0);
+            Screen('glPopMatrix', window)
+        else
+            Screen('DrawTexture', window, texObjectSeq{i}, [], centeredRectM(j,:), 0);   
+        end
+        
+   
         Screen('Flip', window);
         WaitSecs(SecPerFrame/2);  
     end
